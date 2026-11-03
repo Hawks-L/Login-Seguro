@@ -2,28 +2,32 @@ import express from 'express';
 import mongoose from 'mongoose';
 import helmet from 'helmet';
 import cors from 'cors';
-import rateLimit from 'express-rate-limit';
 import authRouter from './src/routes/auth.routes.js';
-import { errorHandler } from './src/middleware/error.middleware.js';
+import { errorHandler, notFound } from './src/middleware/error.middleware.js';
+import { authLimiter } from './src/middleware/rateLimit.middleware.js';
+import { validateEnv } from './src/config/env.js';
 
 const app = express();
 
-// CORS (soporta múltiples orígenes separados por coma)
+// Detrás de Render u otro proxy, para que el rate limiting vea la IP real del cliente.
+if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
+
+// CORS (soporta múltiples orígenes separados por coma). Sin CORS_ORIGIN no se permite ningún origen de navegador.
+const allowedOrigins = (process.env.CORS_ORIGIN || '').split(',').map((o) => o.trim()).filter(Boolean);
+
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') || '*' }));
+app.use(cors({ origin: allowedOrigins, methods: ['GET', 'POST'] }));
 app.use(express.json({ limit: '10kb' }));
 
 export async function connectDB() {
-  const uri = process.env.MONGO_URI;
-
-  console.log('URI ok? Empieza con mongodb+srv://', typeof uri === 'string' && uri.startsWith('mongodb+srv://'));
-  
-  if (!uri) {
-    console.error('❌ MONGO_URI no está definida');
+  const problems = validateEnv();
+  if (problems.length) {
+    problems.forEach((p) => console.error(`❌ ${p}`));
     process.exit(1);
   }
+
   try {
-    await mongoose.connect(uri, { serverSelectionTimeoutMS: 15000, family: 4 });
+    await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 15000, family: 4 });
     console.log('✅ Conectado a MongoDB');
   } catch (err) {
     console.error('❌ Error conectando a MongoDB:', err?.message || err);
@@ -31,45 +35,17 @@ export async function connectDB() {
   }
 }
 
-
-// Health primero, para evitar 502 si Mongo no arranca
+// Health primero, para evitar 502 si Mongo no arranca. No expone detalles internos.
 app.get('/health', (_req, res) => {
-  res.status(200).json({
-    ok: true,
-    uptime: process.uptime(),
-    dbState: mongoose.connection.readyState, // 0,1,2,3
-  });
+  const dbUp = mongoose.connection.readyState === 1;
+  res.status(dbUp ? 200 : 503).json({ ok: dbUp });
 });
 
-// Rate limiting para /auth
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use('/auth', authLimiter);
+// Rutas
+app.use('/auth', authLimiter, authRouter);
 
-// // Conexión DB SIN process.exit
-// async function connectDB() {
-//   try {
-//   const uri = process.env.MONGO_URI;
-//   console.log('URI ok? Empieza con mongodb+srv://', uri?.startsWith('mongodb+srv://'));
-//   await mongoose.connect(uri, { dbName: 'login_seguro', serverSelectionTimeoutMS: 8000 });
-//   console.log('✅ Conectado a MongoDB');
-// } catch (err) {
-//   console.error('❌ Error conectando a MongoDB:', err?.message || err);
-// }
-// }
-// connectDB();
-
-// // Rutas
-app.use('/auth', authRouter);
-
-// // Errores
-// app.use(errorHandler);
-
-
-
+// Errores
+app.use(notFound);
+app.use(errorHandler);
 
 export default app;
